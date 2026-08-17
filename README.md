@@ -13,8 +13,8 @@ VC Save Toolkit supports original PC saves, Steam saves, reVC-compatible saves, 
 | --- | --- |
 | **Retail PC (CD / non-Steam)** | Original Windows `gta-vc.exe` save format |
 | **Steam PC** | Original Steam PC release |
-| **reVC-compatible format** | 32-bit extended save format used by reVC-compatible builds |
-| **Vice City VR** | 64-bit Vice City VR save format |
+| **reVC-compatible format** | used by reVC-compatible builds |
+| **Vice City VR** | Vice City VR save format |
 
 A Vice City save with a recognized but unsupported layout may still open in **read-only** mode. This lets you inspect its basic information and file layout without risking a write to a format the toolkit does not understand well enough to edit.
 
