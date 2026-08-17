@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="viceSunset" x1="118" y1="96" x2="914" y2="940" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#352060"/>
+      <stop offset="0.33" stop-color="#8D3FA8"/>
+      <stop offset="0.67" stop-color="#F04F9B"/>
+      <stop offset="1" stop-color="#FF9A55"/>
+    </linearGradient>
+    <radialGradient id="cyanGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(245 230) rotate(48) scale(560)">
+      <stop stop-color="#53D6E7" stop-opacity="0.55"/>
+      <stop offset="0.56" stop-color="#53D6E7" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#53D6E7" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="iconClip"><rect x="32" y="32" width="960" height="960" rx="220"/></clipPath>
+    <filter id="shadow" x="120" y="120" width="784" height="784" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="20" flood-color="#25122E" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#viceSunset)"/>
+  <g clip-path="url(#iconClip)">
+    <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#cyanGlow)"/>
+  </g>
+
+  <!-- Tabler Icons: device-floppy, transformed from the supplied 24x24 SVG. -->
+  <g transform="translate(192 192) scale(26.6666667)" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#shadow)">
+    <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
+    <path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"/>
+    <path d="M10 14a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/>
+    <path d="M14 4l0 4l-6 0l0 -4"/>
+  </g>
+</svg>
