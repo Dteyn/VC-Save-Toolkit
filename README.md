@@ -1,8 +1,5 @@
 # VC Save Toolkit
 
-> [!WARNING]
-> There is a bug in the current version (0.5.0-rc1) which may prevent saves from from working correctly on Vice City VR standalone version. I'm aware of the issue and working on a fix. v0.5.0-rc2 will be released soon with a fix for this issue.
-
 **VC Save Toolkit** is a desktop editor for *Grand Theft Auto: Vice City* save files. It can edit common player and world values, manage weapons and vehicles, inspect pickups and statistics, convert between supported save formats, and repair the persistent effects left behind by two of Vice City's irreversible pedestrian cheats.
 
 VC Save Toolkit supports original PC saves, Steam saves, reVC-compatible saves, and Vice City VR saves.
