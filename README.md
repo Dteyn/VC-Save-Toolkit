@@ -2,7 +2,7 @@
 
 **VC Save Toolkit** is a desktop editor for *Grand Theft Auto: Vice City* save files. It can edit common player and world values, manage weapons and vehicles, inspect pickups and statistics, convert between supported save formats, and repair the persistent effects left behind by two of Vice City's irreversible pedestrian cheats.
 
-VC Save Toolkit supports original PC saves, Steam saves, reVC-compatible saves, and Vice City VR saves.
+VC Save Toolkit supports original retail/CD PC saves, Steam saves, reVC saves, and both Windows 64-bit and Quest ARM64 Vice City VR/reVC-family saves.
 
 > [!CAUTION]
 > VC Save Toolkit is still beta software. Existing save files are backed up automatically before the toolkit overwrites them, but it is still a good idea to keep a separate copy of any save you care about.
@@ -13,8 +13,9 @@ VC Save Toolkit supports original PC saves, Steam saves, reVC-compatible saves, 
 | --- | --- |
 | **Retail PC (CD / non-Steam)** | Original Windows `gta-vc.exe` save format |
 | **Steam PC** | Original Steam PC release |
-| **reVC-compatible format** | used by reVC-compatible builds |
-| **Vice City VR** | Vice City VR save format |
+| **reVC (Windows 32-bit)** | 32-bit reVC save format with extended player information |
+| **reVC / Vice City VR (Windows 64-bit)** | Win64 reVC / Vice City VR save format |
+| **Vice City VR (Quest)** | Quest ARM64 Vice City VR save format; uses the Quest-specific stored-car ABI |
 
 A Vice City save with a recognized but unsupported layout may still open in **read-only** mode. This lets you inspect its basic information and file layout without risking a write to a format the toolkit does not understand well enough to edit.
 
@@ -213,7 +214,19 @@ To convert a save:
 
 VC Save Toolkit verifies the newly written file before it replaces the destination.
 
-Some cross-runtime conversions are intentionally blocked when the save contains a record that does not yet have a proven safe translation between the 32-bit and 64-bit layouts. If the toolkit refuses one of these conversions, the save itself is not necessarily damaged; that particular conversion is simply not considered safe yet.
+All editable formats listed above can be converted directly to any other editable format. This includes:
+
+- Retail/CD PC ↔ Steam PC.
+- Retail/Steam ↔ reVC Windows 32-bit.
+- 32-bit saves ↔ reVC / Vice City VR Windows 64-bit.
+- 32-bit saves ↔ Vice City VR Quest ARM64.
+- Windows 64-bit ↔ Quest ARM64.
+
+Conversion translates the ABI-dependent Cranes, Pickups, Phones, Garages, Particle Objects, Script Paths, and Player Info layouts while preserving the fixed-layout save blocks. Quest stored vehicles use their native 36-byte ARM64 `CStoredCar` representation; Windows 64-bit uses the 40-byte MSVC representation.
+
+Phone message entries contain process-specific text pointers rather than portable save references. These pointers are cleared during cross-format conversion while the phone's persistent position, timer, entity reference, state, and visibility are preserved. The target game rebuilds or replaces other transient runtime-only fields as part of loading.
+
+Before returning converted data, the toolkit reparses the target and compares a canonical snapshot of loader-consumed persistent state across every ABI-sensitive block. Conversion fails rather than writing the destination if that verification detects lost or shifted state.
 
 ## Restoring a backup
 
@@ -273,7 +286,7 @@ The save failed its integrity check. VC Save Toolkit will not edit it while the 
 
 ### The toolkit refuses a conversion
 
-Some saved runtime records cannot yet be translated safely between every supported format. The conversion is blocked rather than guessing and producing a questionable save.
+The selected source must match one of the supported editable layouts. A conversion can also be rejected if the rebuilt target fails format detection, checksum validation, numeric-width checks, or the post-conversion persistent-state verification. Keep the original file and include it with a bug report if a supported save is rejected.
 
 ### Saving fails
 
