@@ -36,6 +36,7 @@ class SaveProfile:
     script_path_header_size: int | None = None
     garage_record_size: int | None = None
     simple_variant: str = "retail"
+    stored_car_record_size: int = 40
 
 
 STANDARD_PC_PROFILE = SaveProfile(
@@ -49,19 +50,30 @@ STEAM_PC_PROFILE = SaveProfile(
     368, 17556, 1000, 2608, 132, 52, 168, "steam",
 )
 EXTENDED_PC_PROFILE = SaveProfile(
-    "vc-pc-extended", "reVC-compatible format", True,
-    "32-bit reVC-compatible format with extended player information.",
+    "vc-pc-extended", "reVC (Windows 32-bit)", True,
+    "32-bit reVC format with extended player information.",
     416, 17556, 1000, 2608, 132, 52, 168, "retail",
 )
 VICE_CITY_VR_PROFILE = SaveProfile(
-    "vice-city-vr", "Vice City VR", True,
-    "64-bit Vice City VR format with wider runtime records.",
-    416, 21588, 1160, 4408, 152, 88, 184, "retail",
+    "vice-city-vr", "reVC / Vice City VR (Windows 64-bit)", True,
+    "Windows 64-bit reVC / Vice City VR format with MSVC 40-byte stored-car records.",
+    416, 21588, 1160, 4408, 152, 88, 184, "retail", 40,
+)
+VICE_CITY_VR_QUEST_PROFILE = SaveProfile(
+    "vice-city-vr-quest", "Vice City VR (Quest)", True,
+    "Quest ARM64 Vice City VR format with 36-byte AAPCS64 stored-car records.",
+    416, 21588, 1160, 4408, 152, 88, 184, "retail", 36,
 )
 SUPPORTED_PROFILES = (
-    STANDARD_PC_PROFILE, STEAM_PC_PROFILE, EXTENDED_PC_PROFILE, VICE_CITY_VR_PROFILE,
+    STANDARD_PC_PROFILE, STEAM_PC_PROFILE, EXTENDED_PC_PROFILE,
+    VICE_CITY_VR_PROFILE, VICE_CITY_VR_QUEST_PROFILE,
 )
 SUPPORTED_PROFILE_BY_KEY = {profile.key: profile for profile in SUPPORTED_PROFILES}
+X86_PROFILE_KEYS = frozenset({
+    STANDARD_PC_PROFILE.key, STEAM_PC_PROFILE.key, EXTENDED_PC_PROFILE.key,
+})
+VR64_PROFILE_KEYS = frozenset({VICE_CITY_VR_PROFILE.key, VICE_CITY_VR_QUEST_PROFILE.key})
+
 UNKNOWN_PROFILE = SaveProfile(
     "vc-unknown", "Vice City save (unclassified)", False,
     "Valid Vice City save with an unsupported block layout.",
@@ -336,10 +348,14 @@ def _convert_cranes(inner: bytes, target_size: int) -> bytes:
 
 
 def _convert_phones(inner: bytes, target_size: int) -> bytes:
-    """Re-encode phone records; transient message pointers are cleared across pointer widths."""
+    """Re-encode phone records and clear process-specific text pointers.
+
+    CPhone::m_apMessages contains six live wchar* addresses. They are valid only
+    in the executable/process that produced the save and cannot be translated
+    between retail, Steam, reVC, Win64, or Quest. Cross-format conversion keeps
+    all persistent phone state but deliberately writes those six pointers null.
+    """
     source_size = len(inner)
-    if source_size == target_size:
-        return bytes(inner)
     if source_size not in (2608, 4408) or target_size not in (2608, 4408):
         raise SaveFormatError("Unsupported phone conversion.")
 
@@ -350,22 +366,44 @@ def _convert_phones(inner: bytes, target_size: int) -> bytes:
     for slot in range(50):
         src = 8 + slot * source_stride
         dst = 8 + slot * target_stride
-        result[dst:dst + 12] = inner[src:src + 12]
+        result[dst:dst + 12] = inner[src:src + 12]  # position
+
         if source_stride == 52:
-            # Six live text pointers are process-specific and cannot be translated
-            # into another executable's address space; leave them null.
-            result[dst + 64:dst + 68] = inner[src + 36:src + 40]
-            _write_uint(result, dst + 72, 8, _read_uint(inner, src + 40, 4))
-            result[dst + 80:dst + 84] = inner[src + 44:src + 48]
-            result[dst + 84] = inner[src + 48]
+            repeated_timer = inner[src + 36:src + 40]
+            entity = _read_uint(inner, src + 40, 4)
+            state = inner[src + 44:src + 48]
+            visible = inner[src + 48]
         else:
+            repeated_timer = inner[src + 64:src + 68]
             entity = _read_uint(inner, src + 72, 8)
+            state = inner[src + 80:src + 84]
+            visible = inner[src + 84]
+
+        if target_stride == 52:
             if entity > 0xFFFFFFFF:
                 raise SaveFormatError("Phone entity reference cannot be represented in the selected 32-bit format.")
-            result[dst + 36:dst + 40] = inner[src + 64:src + 68]
+            result[dst + 36:dst + 40] = repeated_timer
             _write_uint(result, dst + 40, 4, entity)
-            result[dst + 44:dst + 48] = inner[src + 80:src + 84]
-            result[dst + 48] = inner[src + 84]
+            result[dst + 44:dst + 48] = state
+            result[dst + 48] = visible
+        else:
+            result[dst + 64:dst + 68] = repeated_timer
+            _write_uint(result, dst + 72, 8, entity)
+            result[dst + 80:dst + 84] = state
+            result[dst + 84] = visible
+    return bytes(result)
+
+
+def _clear_phone_message_pointers(inner: bytes) -> bytes:
+    """Clear only CPhone::m_apMessages, preserving every unrelated/padding byte."""
+    if len(inner) not in (2608, 4408):
+        raise SaveFormatError("Unsupported phone layout.")
+    stride = 52 if len(inner) == 2608 else 88
+    pointer_width = 4 if stride == 52 else 8
+    result = bytearray(inner)
+    for slot in range(50):
+        base = 8 + slot * stride + 12
+        result[base:base + 6 * pointer_width] = bytes(6 * pointer_width)
     return bytes(result)
 
 
@@ -376,73 +414,148 @@ STEAM_RELEASE_MARKER = -3
 
 
 GARAGE_BLOCK_SIZE = 7876
-GARAGE_PREFIX_SIZE = 1964
+GARAGE_HEADER_SIZE = 44
+GARAGE_STORED_CAR_COUNT = 48
 GARAGE_COUNT = 32
 GARAGE_RECORD_SIZES = (168, 184)
+STORED_CAR_RECORD_SIZES = (36, 40)
 
 
-def _garage_layout_score(inner: bytes, stride: int) -> int:
-    """Score how many of the 32 garage headers look sane for a candidate stride."""
-    if stride not in GARAGE_RECORD_SIZES or len(inner) != GARAGE_BLOCK_SIZE:
-        return -1
-    score = 0
+def _garage_records_offset(stored_car_record_size: int) -> int:
+    if stored_car_record_size not in STORED_CAR_RECORD_SIZES:
+        raise SaveFormatError("Unsupported stored-car record layout.")
+    return GARAGE_HEADER_SIZE + GARAGE_STORED_CAR_COUNT * stored_car_record_size
+
+
+def _garage_layout_score(inner: bytes, garage_stride: int, stored_car_stride: int) -> tuple[int, int]:
+    """Score a raw garage layout by sane headers and initialized garage count."""
+    if (garage_stride not in GARAGE_RECORD_SIZES or
+            stored_car_stride not in STORED_CAR_RECORD_SIZES or
+            len(inner) != GARAGE_BLOCK_SIZE):
+        return (-1, -1)
+    base = _garage_records_offset(stored_car_stride)
+    sane = 0
+    active = 0
     for index in range(GARAGE_COUNT):
-        offset = GARAGE_PREFIX_SIZE + index * stride
-        if offset + stride > len(inner):
-            break
+        offset = base + index * garage_stride
+        if offset + garage_stride > len(inner):
+            return (-1, -1)
         garage_type = inner[offset]
         garage_state = inner[offset + 1]
         max_stored = inner[offset + 2]
         if garage_type <= 32 and garage_state <= 6 and max_stored <= 8:
-            score += 1
-    return score
+            sane += 1
+        if garage_type != 0:
+            active += 1
+    return sane, active
 
 
-def _garage_record_size_for_block(data: bytes | bytearray, block: "Block") -> int | None:
+def _garage_layout_for_block(
+    data: bytes | bytearray, block: "Block"
+) -> tuple[int, int] | None:
+    """Return (CGarage stride, CStoredCar stride), including the Quest ABI split."""
     if block.inner_size != GARAGE_BLOCK_SIZE:
         return None
     start = block.data_offset + 4
     inner = bytes(data[start:start + block.inner_size])
-    scores = {stride: _garage_layout_score(inner, stride) for stride in GARAGE_RECORD_SIZES}
-    perfect = [stride for stride, score in scores.items() if score == GARAGE_COUNT]
-    return perfect[0] if len(perfect) == 1 else None
+    candidates = ((168, 40), (184, 40), (184, 36))
+    scores = {layout: _garage_layout_score(inner, *layout) for layout in candidates}
+    perfect = [(layout, score[1]) for layout, score in scores.items() if score[0] == GARAGE_COUNT]
+    if not perfect:
+        return None
+    best_active = max(active for _, active in perfect)
+    best = [layout for layout, active in perfect if active == best_active]
+    return best[0] if len(best) == 1 else None
 
 
-def _convert_garages(inner: bytes, source_stride: int, target_stride: int) -> bytes:
-    """Convert the raw 32/64-bit CGarage array while preserving portable garage state."""
-    if (source_stride not in GARAGE_RECORD_SIZES or target_stride not in GARAGE_RECORD_SIZES or
+def _garage_record_size_for_block(data: bytes | bytearray, block: "Block") -> int | None:
+    layout = _garage_layout_for_block(data, block)
+    return layout[0] if layout is not None else None
+
+
+def _convert_stored_car_record(record: bytes, source_size: int, target_size: int) -> bytes:
+    """Convert CStoredCar between the MSVC 40-byte and Quest AAPCS64 36-byte ABIs."""
+    if source_size not in STORED_CAR_RECORD_SIZES or target_size not in STORED_CAR_RECORD_SIZES:
+        raise SaveFormatError("Unsupported stored-car conversion.")
+    if len(record) < source_size:
+        raise SaveFormatError("Stored-car record is incomplete.")
+    if source_size == target_size:
+        return bytes(record[:source_size])
+    result = bytearray(target_size)
+    # model, position, angle, and the low byte containing all five protection bits
+    result[:29] = record[:29]
+    source_fields = 32 if source_size == 40 else 29
+    target_fields = 32 if target_size == 40 else 29
+    result[target_fields:target_fields + 6] = record[source_fields:source_fields + 6]
+    return bytes(result)
+
+
+def _convert_garages(
+    inner: bytes,
+    source_garage_stride: int,
+    target_garage_stride: int,
+    source_stored_car_stride: int = 40,
+    target_stored_car_stride: int = 40,
+) -> bytes:
+    """Convert CGarage and CStoredCar ABI layouts while preserving persistent state."""
+    if (source_garage_stride not in GARAGE_RECORD_SIZES or
+            target_garage_stride not in GARAGE_RECORD_SIZES or
+            source_stored_car_stride not in STORED_CAR_RECORD_SIZES or
+            target_stored_car_stride not in STORED_CAR_RECORD_SIZES or
             len(inner) != GARAGE_BLOCK_SIZE):
         raise SaveFormatError("Unsupported garage conversion.")
-    if source_stride == target_stride:
+    if (source_garage_stride == target_garage_stride and
+            source_stored_car_stride == target_stored_car_stride):
         return bytes(inner)
 
     result = bytearray(GARAGE_BLOCK_SIZE)
-    # Global garage state and 48 CStoredCar records are pointer-width independent.
-    result[:GARAGE_PREFIX_SIZE] = inner[:GARAGE_PREFIX_SIZE]
-    for index in range(GARAGE_COUNT):
-        src = GARAGE_PREFIX_SIZE + index * source_stride
-        dst = GARAGE_PREFIX_SIZE + index * target_stride
-        if source_stride == 184:
-            # 64-bit raw CGarage -> retail 0xA8 record. Door/target pointer fields
-            # and the embedded scratch stored-car record are zeroed. The loader
-            # rebuilds the door/target pointers after loading.
-            result[dst:dst + 12] = inner[src:src + 12]
-            result[dst + 12:dst + 20] = bytes(8)
-            result[dst + 20:dst + 27] = inner[src + 32:src + 39]
-            result[dst + 27] = 0
-            result[dst + 28:dst + 121] = inner[src + 40:src + 133]
-            result[dst + 121:dst + 168] = bytes(47)
+    result[:GARAGE_HEADER_SIZE] = inner[:GARAGE_HEADER_SIZE]
+
+    src = GARAGE_HEADER_SIZE
+    dst = GARAGE_HEADER_SIZE
+    for _ in range(GARAGE_STORED_CAR_COUNT):
+        result[dst:dst + target_stored_car_stride] = _convert_stored_car_record(
+            inner[src:src + source_stored_car_stride],
+            source_stored_car_stride,
+            target_stored_car_stride,
+        )
+        src += source_stored_car_stride
+        dst += target_stored_car_stride
+
+    for _ in range(GARAGE_COUNT):
+        source_record = inner[src:src + source_garage_stride]
+        target_record = bytearray(target_garage_stride)
+        if source_garage_stride == target_garage_stride == 184:
+            # Win64 and Quest have the same CGarage offsets through m_pTarget. Mirror
+            # the Quest source tree's transfer utility and rewrite only the embedded
+            # CStoredCar ABI; Load() clears the copied runtime pointers before use.
+            target_record[:144] = source_record[:144]
+            target_record[144:144 + target_stored_car_stride] = _convert_stored_car_record(
+                source_record[144:144 + source_stored_car_stride],
+                source_stored_car_stride,
+                target_stored_car_stride,
+            )
+        elif source_garage_stride == 184:
+            # 64-bit raw CGarage -> retail 0xA8. Runtime pointers and scratch car
+            # are non-persistent and intentionally cleared.
+            target_record[:12] = source_record[:12]
+            target_record[12:20] = bytes(8)
+            target_record[20:27] = source_record[32:39]
+            target_record[27] = 0
+            target_record[28:121] = source_record[40:133]
         else:
-            # Retail 0xA8 -> 64-bit raw CGarage (0xB8). Runtime pointers are null and
-            # the VR loader refreshes the door pointers after reading each record.
-            result[dst:dst + 12] = inner[src:src + 12]
-            result[dst + 12:dst + 32] = bytes(20)
-            result[dst + 32:dst + 39] = inner[src + 20:src + 27]
-            result[dst + 39] = 0
-            result[dst + 40:dst + 133] = inner[src + 28:src + 121]
-            result[dst + 133:dst + 184] = bytes(51)
-    # Retail has 536 bytes of non-semantic tail; wide layout has 24. Keep all
-    # remaining bytes deterministic rather than propagating work-buffer garbage.
+            # Retail 0xA8 -> 64-bit raw CGarage. Runtime pointers are null; the
+            # loader refreshes door/target pointers after reading each record.
+            target_record[:12] = source_record[:12]
+            target_record[12:32] = bytes(20)
+            target_record[32:39] = source_record[20:27]
+            target_record[39] = 0
+            target_record[40:133] = source_record[28:121]
+        result[dst:dst + target_garage_stride] = target_record
+        src += source_garage_stride
+        dst += target_garage_stride
+
+    # The rest of the fixed 7876-byte payload is non-semantic work-buffer tail.
     return bytes(result)
 
 
@@ -555,6 +668,74 @@ def _convert_script_paths(inner: bytes, target_header_size: int) -> bytes:
         result += inner[node_start:node_end]
         offset = node_end
     return bytes(result)
+
+
+def _canonical_pickups(inner: bytes) -> bytes:
+    """Return pickup state in a padding-independent 32-bit canonical layout."""
+    if len(inner) == 17556:
+        # Round-trip through the widened representation so ABI padding is rebuilt
+        # rather than treated as gameplay state.
+        return _convert_pickups(_convert_pickups(inner, 21588), 17556)
+    return _convert_pickups(inner, 17556)
+
+
+def _canonical_cranes(inner: bytes) -> bytes:
+    """Return crane state in a padding-independent 32-bit canonical layout."""
+    if len(inner) == 1000:
+        return _convert_cranes(_convert_cranes(inner, 1160), 1000)
+    return _convert_cranes(inner, 1000)
+
+
+def _canonical_phones(inner: bytes) -> bytes:
+    """Return persistent phone state with process-specific message pointers null."""
+    return _convert_phones(inner, 2608)
+
+
+def _canonical_particles(inner: bytes) -> bytes:
+    """Return persistent particle state without live matrix/list/runtime pointers."""
+    if len(inner) < 4:
+        raise SaveFormatError("Particle-object block is incomplete.")
+    count = struct.unpack_from("<I", inner, 0)[0]
+    records = count + 1
+    if records <= 0 or (len(inner) - 4) % records:
+        raise SaveFormatError("Particle-object block has an unsupported size.")
+    stride = (len(inner) - 4) // records
+    if stride == 132:
+        return _convert_particles(_convert_particles(inner, 152), 132)
+    return _convert_particles(inner, 132)
+
+
+def _canonical_script_paths(inner: bytes) -> bytes:
+    """Return script-path state without the transient allocated-node pointer."""
+    layouts = [size for size in SCRIPT_PATH_HEADER_SIZES if _script_path_layout(inner, size)]
+    if len(layouts) != 1:
+        raise SaveFormatError("Script-path block layout is not recognized.")
+    if layouts[0] == 52:
+        return _convert_script_paths(_convert_script_paths(inner, 88), 52)
+    return _convert_script_paths(inner, 52)
+
+
+def _canonical_garages(
+    inner: bytes, garage_stride: int, stored_car_stride: int
+) -> bytes:
+    """Return persistent garage state in a pointer/padding-independent x86 layout."""
+    if garage_stride == 168:
+        widened = _convert_garages(inner, 168, 184, stored_car_stride, 40)
+        canonical = bytearray(_convert_garages(widened, 184, 168, 40, 40))
+    else:
+        canonical = bytearray(_convert_garages(
+            inner, garage_stride, 168, stored_car_stride, 40
+        ))
+
+    # CStoredCar's protection flags are a five-bit C++ bitfield. Compiler-owned
+    # upper bits and trailing alignment bytes are not gameplay state.
+    offset = GARAGE_HEADER_SIZE
+    for _ in range(GARAGE_STORED_CAR_COUNT):
+        flags = _read_uint(canonical, offset + 28, 4) & 0x1F
+        _write_uint(canonical, offset + 28, 4, flags)
+        canonical[offset + 38:offset + 40] = b"\0\0"
+        offset += 40
+    return bytes(canonical)
 
 
 def _simple_variant_from_block(block: bytes) -> str | None:
@@ -748,7 +929,7 @@ class SaveFile:
         simple_variant = _simple_variant_from_block(simple_piece)
         particle_stride = _particle_stride_for_block(self._data, self.blocks[15])
         script_path_header = _script_path_header_for_block(self._data, self.blocks[17])
-        garage_record_size = _garage_record_size_for_block(self._data, self.blocks[2])
+        garage_layout = _garage_layout_for_block(self._data, self.blocks[2])
         common_edit_signature = (
             self.blocks[1].inner_size == 1795 and
             self.blocks[2].inner_size == 7876 and
@@ -768,7 +949,7 @@ class SaveFile:
                     continue
                 if script_path_header is not None and script_path_header != profile.script_path_header_size:
                     continue
-                if garage_record_size is not None and garage_record_size != profile.garage_record_size:
+                if garage_layout is not None and garage_layout != (profile.garage_record_size, profile.stored_car_record_size):
                     continue
                 return profile
         return UNKNOWN_PROFILE
@@ -816,6 +997,12 @@ class SaveFile:
                 f"{self.profile.name} is recognized but not approved for editing. "
                 "No changes were written."
             )
+
+    def conversion_safety_issue(self, target_profile_key: str) -> str | None:
+        """Return a reason a requested output format cannot be produced."""
+        if target_profile_key not in SUPPORTED_PROFILE_BY_KEY:
+            return f"Unknown output format: {target_profile_key}"
+        return None
 
     def player(self) -> PlayerValues:
         ped = self._player_ped_offset()
@@ -966,17 +1153,22 @@ class SaveFile:
         block = self.blocks[2]
         if block.inner_size != 7876:
             raise SaveFormatError("The garage block uses an unsupported layout.")
-        return read_stored_cars(self._data, block.data_offset + 4)
+        return read_stored_cars(
+            self._data, block.data_offset + 4, self.profile.stored_car_record_size
+        )
 
     def hideout_garage_geometries(self):
         """Serialized hideout CGarage geometry keyed by storage group."""
         block = self.blocks[2]
         if block.inner_size != 7876:
             raise SaveFormatError("The garage block uses an unsupported layout.")
-        stride = _garage_record_size_for_block(self._data, block)
-        if stride is None:
+        layout = _garage_layout_for_block(self._data, block)
+        if layout is None:
             raise SaveFormatError("The garage record layout could not be identified.")
-        return read_hideout_garage_geometries(self._data, block.data_offset + 4, stride)
+        stride, stored_car_stride = layout
+        return read_hideout_garage_geometries(
+            self._data, block.data_offset + 4, stride, stored_car_stride
+        )
 
 
     def hideout_garage_capacities(self) -> dict[int, int]:
@@ -984,14 +1176,20 @@ class SaveFile:
         block = self.blocks[2]
         if block.inner_size != 7876:
             raise SaveFormatError("The garage block uses an unsupported layout.")
-        stride = _garage_record_size_for_block(self._data, block)
-        if stride is None:
+        layout = _garage_layout_for_block(self._data, block)
+        if layout is None:
             raise SaveFormatError("The garage record layout could not be identified.")
-        return read_hideout_garage_capacities(self._data, block.data_offset + 4, stride)
+        stride, stored_car_stride = layout
+        return read_hideout_garage_capacities(
+            self._data, block.data_offset + 4, stride, stored_car_stride
+        )
 
     def set_stored_car(self, record: StoredCarRecord) -> None:
         self._require_editable()
-        write_stored_car(self._data, self.blocks[2].data_offset + 4, record)
+        write_stored_car(
+            self._data, self.blocks[2].data_offset + 4, record,
+            self.profile.stored_car_record_size,
+        )
         self._refresh_checksum()
 
     def gangs(self) -> list[GangRecord]:
@@ -1114,6 +1312,52 @@ class SaveFile:
     def export_profiles() -> tuple[SaveProfile, ...]:
         return SUPPORTED_PROFILES
 
+    def _block_inner_bytes(self, index: int) -> bytes:
+        block = self.blocks[index]
+        if block.inner_size is None:
+            raise SaveFormatError(f"Save block {index} has no nested payload.")
+        start = block.data_offset + 4
+        return bytes(self._data[start:start + block.inner_size])
+
+    def _conversion_semantics(self) -> tuple[object, ...]:
+        """Canonical loader-consumed state used to verify format conversion.
+
+        Cross-ABI saves legitimately differ in alignment, padding and live pointer
+        placeholders. This snapshot normalizes those bytes while retaining every
+        field the corresponding load routines consume as persistent state.
+        """
+        simple_piece = bytes(self._data[self.blocks[0].offset:self.blocks[0].end])
+        if self.profile.simple_variant == "steam":
+            simple_piece = _convert_simple_variant(simple_piece, "steam", "retail")
+
+        garage_stride = self.profile.garage_record_size
+        if garage_stride is None:
+            raise SaveFormatError("Garage layout is unavailable for conversion validation.")
+
+        # Blocks not listed here are copied byte-for-byte by the converter. Keeping
+        # them in the snapshot catches accidental mutation of pools, scripts, radar,
+        # zones, generators, stats, streaming state, and other fixed-layout data.
+        converted_indices = {0, 2, 7, 8, 9, 15, 17, 18}
+        unchanged = tuple(
+            (index, bytes(self._data[block.offset:block.end]))
+            for index, block in enumerate(self.blocks)
+            if index not in converted_indices
+        )
+
+        return (
+            simple_piece,
+            _canonical_garages(
+                self._block_inner_bytes(2), garage_stride, self.profile.stored_car_record_size
+            ),
+            _canonical_cranes(self._block_inner_bytes(7)),
+            _canonical_pickups(self._block_inner_bytes(8)),
+            _canonical_phones(self._block_inner_bytes(9)),
+            _canonical_particles(self._block_inner_bytes(15)),
+            _canonical_script_paths(self._block_inner_bytes(17)),
+            self._block_inner_bytes(18)[:108],
+            unchanged,
+        )
+
     def export_bytes(self, target_profile_key: str | None = None) -> bytes:
         """Return a validated copy encoded for any supported output profile."""
         self._require_editable()
@@ -1125,17 +1369,60 @@ class SaveFile:
         if target.key == self.profile.key:
             return self.validated_bytes()
 
-        crosses_vr_boundary = (
-            (self.profile.key == VICE_CITY_VR_PROFILE.key) !=
-            (target.key == VICE_CITY_VR_PROFILE.key)
-        )
-        vehicle_count = _saved_vehicle_count(self._data, self.blocks[4])
-        if crosses_vr_boundary and vehicle_count:
-            raise SaveFormatError(
-                "This save contains live saved vehicle records whose 32/64-bit conversion is not "
-                "yet proven safe. Save in the same runtime family or remove/finish the mission state "
-                "that created those records before converting."
+        issue = self.conversion_safety_issue(target.key)
+        if issue is not None:
+            raise SaveFormatError(issue)
+
+        # Current Win64 VR <-> Quest is a narrowly verified platform transfer.
+        # Only the Garages payload differs between these current builds.  Patch
+        # that payload in place so every unrelated byte, including opaque save
+        # padding/runtime bytes, is preserved exactly like the Quest source
+        # converter instead of rebuilding the whole container.
+        if self.profile.key in VR64_PROFILE_KEYS and target.key in VR64_PROFILE_KEYS:
+            garage = self.blocks[2]
+            assert garage.inner_size is not None
+            source_garage_size = self.profile.garage_record_size
+            assert source_garage_size is not None and target.garage_record_size is not None
+            start = garage.data_offset + 4
+            inner = bytes(self._data[start:start + garage.inner_size])
+            converted_inner = _convert_garages(
+                inner,
+                source_garage_size,
+                target.garage_record_size,
+                self.profile.stored_car_record_size,
+                target.stored_car_record_size,
             )
+            rebuilt = bytearray(self._data)
+            rebuilt[start:start + garage.inner_size] = converted_inner
+
+            # Phone message entries contain live text pointers. Win64 and Quest
+            # have the same pointer width, but not the same address space, so clear
+            # those pointers even on this otherwise byte-preserving platform hop.
+            phone = self.blocks[9]
+            assert phone.inner_size is not None and target.phone_size is not None
+            phone_start = phone.data_offset + 4
+            phone_inner = bytes(self._data[phone_start:phone_start + phone.inner_size])
+            rebuilt[phone_start:phone_start + phone.inner_size] = _clear_phone_message_pointers(
+                phone_inner
+            )
+
+            struct.pack_into("<I", rebuilt, len(rebuilt) - 4, checksum(rebuilt[:-4]))
+            result = SaveFile(bytes(rebuilt))
+            if result.profile.key != target.key:
+                raise SaveFormatError(
+                    f"Converted output validated as {result.profile.name}, not {target.name}."
+                )
+            if result._conversion_semantics() != self._conversion_semantics():
+                raise SaveFormatError(
+                    "Converted VR platform output did not preserve all persistent state."
+                )
+            if (result.player() != self.player() or result.world() != self.world() or
+                    result.weapons() != self.weapons() or result.pickups() != self.pickups() or
+                    result.car_generators() != self.car_generators() or
+                    result.stored_cars() != self.stored_cars() or result.gangs() != self.gangs() or
+                    result.stats() != self.stats()):
+                raise SaveFormatError("Converted VR platform output did not preserve editable state.")
+            return bytes(rebuilt)
 
         converted: dict[int, bytes] = {}
         garage = self.blocks[2]
@@ -1143,9 +1430,15 @@ class SaveFile:
         garage_start = garage.data_offset + 4
         garage_inner = bytes(self._data[garage_start:garage_start + garage.inner_size])
         source_garage_size = self.profile.garage_record_size
-        if source_garage_size is not None and source_garage_size != target.garage_record_size:
+        if (source_garage_size is not None and
+                (source_garage_size != target.garage_record_size or
+                 self.profile.stored_car_record_size != target.stored_car_record_size)):
             converted[2] = _nested_block(_convert_garages(
-                garage_inner, source_garage_size, target.garage_record_size
+                garage_inner,
+                source_garage_size,
+                target.garage_record_size,
+                self.profile.stored_car_record_size,
+                target.stored_car_record_size,
             ))
 
         for index, converter, target_size in (
@@ -1207,6 +1500,11 @@ class SaveFile:
         if result.profile.key != target.key:
             raise SaveFormatError(
                 f"Converted output validated as {result.profile.name}, not {target.name}."
+            )
+
+        if result._conversion_semantics() != self._conversion_semantics():
+            raise SaveFormatError(
+                "Converted output did not preserve all loader-consumed persistent state."
             )
 
         # Verify the user-facing state that the toolkit preserves.

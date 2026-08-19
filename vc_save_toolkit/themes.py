@@ -25,6 +25,7 @@ QLabel#sourceFormatPill {{ color: {text}; padding: 2px 4px; font-weight: 600; }}
 QLabel#contextLabel {{ color: {muted}; font-size: 9pt; font-weight: 600; }}
 QLabel#statusGood, QLabel#integrityGood {{ color: {good}; font-weight: 600; }}
 QLabel#integrityIdle {{ color: {muted}; }}
+QLabel#integrityWarning {{ color: {warning}; font-weight: 600; }}
 QLabel#warningText {{ color: {warning}; }}
 
 QLabel#stateBadge {{

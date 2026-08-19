@@ -466,46 +466,77 @@ def write_car_generator(data: bytearray, start: int, record: CarGeneratorRecord)
     struct.pack_into("<H", data, offset + 40, record.uses_remaining)
 
 
-def read_stored_cars(data: bytes | bytearray, start: int) -> list[StoredCarRecord]:
+def _stored_car_layout(record_size: int) -> tuple[int, int]:
+    """Return (flags width, colour offset) for one serialized CStoredCar.
+
+    Retail/Win64 MSVC saves use a 40-byte record with the bitfield storage unit
+    occupying bytes 28..31. Quest ARM64 follows the AAPCS64 bitfield ABI and
+    places the six int8 fields immediately after the used flag byte, producing a
+    36-byte record.
+    """
+    if record_size == 40:
+        return 4, 32
+    if record_size == 36:
+        return 1, 29
+    raise ValueError(f"Unsupported stored-car record size: {record_size}")
+
+
+def read_stored_cars(
+    data: bytes | bytearray, start: int, record_size: int = 40
+) -> list[StoredCarRecord]:
+    flags_width, colour_at = _stored_car_layout(record_size)
     array = start + 44
     records = []
     # File order is slot-major, then garage.
     for slot in range(STORED_CARS_PER_GROUP):
         for garage in range(STORAGE_GROUP_COUNT):
-            offset = array + stored_car_raw_index(garage, slot) * 40
+            offset = array + stored_car_raw_index(garage, slot) * record_size
             model = struct.unpack_from("<i", data, offset)[0]
             position = struct.unpack_from("<3f", data, offset + 4)
             angles = struct.unpack_from("<3f", data, offset + 16)
-            flags = struct.unpack_from("<i", data, offset + 28)[0]
-            color_1, color_2, radio, variation_a, variation_b, bomb = struct.unpack_from("<6b", data, offset + 32)
+            if flags_width == 4:
+                flags = struct.unpack_from("<I", data, offset + 28)[0] & 0x1F
+            else:
+                flags = data[offset + 28] & 0x1F
+            color_1, color_2, radio, variation_a, variation_b, bomb = struct.unpack_from(
+                "<6b", data, offset + colour_at
+            )
             records.append(StoredCarRecord(garage, slot, model, position, angles,
                                            flags, color_1, color_2, radio, bomb,
                                            variation_a, variation_b))
     return sorted(records, key=lambda item: (item.garage, item.slot))
 
 
-def write_stored_car(data: bytearray, start: int, record: StoredCarRecord) -> None:
+def write_stored_car(
+    data: bytearray, start: int, record: StoredCarRecord, record_size: int = 40
+) -> None:
     if not finite((*record.position, *record.angles)):
         raise ValueError("Stored-car coordinates and angles must be finite.")
-    offset = start + 44 + stored_car_raw_index(record.garage, record.slot) * 40
-    struct.pack_into("<i3f3fi", data, offset, record.model_id, *record.position,
-                     *record.angles, record.flags)
-    struct.pack_into("<3b", data, offset + 32, record.color_1, record.color_2, record.radio)
+    if not 0 <= record.flags <= 0x1F:
+        raise ValueError("Stored-car protection flags must be between 0 and 31.")
+    flags_width, colour_at = _stored_car_layout(record_size)
+    offset = start + 44 + stored_car_raw_index(record.garage, record.slot) * record_size
+    struct.pack_into("<i3f3f", data, offset, record.model_id, *record.position, *record.angles)
+    if flags_width == 4:
+        raw_flags = struct.unpack_from("<I", data, offset + 28)[0]
+        struct.pack_into("<I", data, offset + 28, (raw_flags & ~0x1F) | (record.flags & 0x1F))
+    else:
+        data[offset + 28] = (data[offset + 28] & 0xE0) | (record.flags & 0x1F)
+    struct.pack_into("<3b", data, offset + colour_at,
+                     record.color_1, record.color_2, record.radio)
     if record.variation_a is not None:
         if not -128 <= record.variation_a <= 127:
             raise ValueError("Stored-car variation A is out of range.")
-        struct.pack_into("<b", data, offset + 35, record.variation_a)
+        struct.pack_into("<b", data, offset + colour_at + 3, record.variation_a)
     if record.variation_b is not None:
         if not -128 <= record.variation_b <= 127:
             raise ValueError("Stored-car variation B is out of range.")
-        struct.pack_into("<b", data, offset + 36, record.variation_b)
-    struct.pack_into("<b", data, offset + 37, record.bomb_type)
+        struct.pack_into("<b", data, offset + colour_at + 4, record.variation_b)
+    struct.pack_into("<b", data, offset + colour_at + 5, record.bomb_type)
 
 
-# Compatible saves store 32 fixed-size 168-byte garage records after the
-# 44-byte header and 48 stored-car records. These fields provide garage geometry
-# for automatic vehicle placement.
-_GARAGE_RECORDS_OFFSET = 44 + (STORAGE_GROUP_COUNT * STORED_CARS_PER_GROUP * 40)
+# Compatible saves store 32 fixed-size garage records after the 44-byte header
+# and 48 stored-car records. Quest differs only in the standalone CStoredCar ABI.
 _GARAGE_RECORD_SIZE = 168
 _MAX_REASONABLE_GARAGE_DIMENSION = 200.0
 
@@ -519,13 +550,14 @@ def _safehouse_index_for_type(garage_type: int) -> int | None:
 
 
 def read_hideout_garage_capacities(
-    data: bytes | bytearray, start: int, garage_record_size: int = 168
+    data: bytes | bytearray, start: int, garage_record_size: int = 168,
+    stored_car_record_size: int = 40,
 ) -> dict[int, int]:
     """Read m_nMaxStoredCars from serialized hideout CGarage headers."""
     if garage_record_size not in (168, 184):
         return {}
     result: dict[int, int] = {}
-    base = start + _GARAGE_RECORDS_OFFSET
+    base = start + 44 + STORAGE_GROUP_COUNT * STORED_CARS_PER_GROUP * stored_car_record_size
     for index in range(32):
         offset = base + index * garage_record_size
         if offset + 3 > len(data):
@@ -537,14 +569,15 @@ def read_hideout_garage_capacities(
 
 
 def read_hideout_garage_geometries(
-    data: bytes | bytearray, start: int, garage_record_size: int = 168
+    data: bytes | bytearray, start: int, garage_record_size: int = 168,
+    stored_car_record_size: int = 40,
 ) -> dict[int, GarageGeometry]:
     """Decode the persistent geometry fields for the 12 hideout garage types."""
     if garage_record_size not in (168, 184):
         return {}
     geometry_shift = 12 if garage_record_size == 184 else 0
     result: dict[int, GarageGeometry] = {}
-    base = start + _GARAGE_RECORDS_OFFSET
+    base = start + 44 + STORAGE_GROUP_COUNT * STORED_CARS_PER_GROUP * stored_car_record_size
     for index in range(32):
         offset = base + index * garage_record_size
         if offset + garage_record_size > len(data):

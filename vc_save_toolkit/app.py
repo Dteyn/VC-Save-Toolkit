@@ -244,8 +244,13 @@ class GarageVehicleDialog(QDialog):
         self.radio = QComboBox()
         for label, station in radio_choices(include_default=True):
             self.radio.addItem(label, station)
+        if not adding and self.radio.findData(record.radio) < 0:
+            # Some game-created vehicles use streamed/special radio IDs outside
+            # the normal player-selectable station range. Preserve them unless
+            # the user explicitly chooses another station.
+            self.radio.addItem(f"Stored game value ({record.radio})", record.radio)
         configure_combo_popup(self.radio)
-        radio = record.radio if not adding and -1 <= record.radio <= 10 else -1
+        radio = record.radio if not adding else -1
         self.radio.setCurrentIndex(max(0, self.radio.findData(radio)))
         for combo in (self.color_1, self.color_2, self.radio):
             set_combo_id_tooltip(combo)
@@ -1425,7 +1430,8 @@ class MainWindow(QMainWindow):
             "gta-vc-pc": "Original 32-bit retail PC format.",
             "gta-vc-steam": "Steam PC format with its Block 0 marker.",
             "vc-pc-extended": "reVC-compatible 32-bit format.",
-            "vice-city-vr": "Vice City VR 64-bit format.",
+            "vice-city-vr": "Vice City VR Windows 64-bit format.",
+            "vice-city-vr-quest": "Vice City VR Quest ARM64 format.",
         }
         for profile in sorted(SaveFile.export_profiles(), key=lambda item: item.name.casefold()):
             self.output_format_combo.addItem(profile.name, profile.key)
@@ -2545,11 +2551,16 @@ class MainWindow(QMainWindow):
         elif target.key == self.save.profile.key:
             self.export_help.setText("Save in place. Automatic backup before overwrite.")
         else:
-            self.export_help.setText(f"Save As or Save to Slot will create {target.name} output.")
-            self.conversion_notice.set_message(
-                "Format conversion",
-                f"{self.save.profile.name} → {target.name}; choose Save As or Save to Slot.",
-            )
+            issue = self.save.conversion_safety_issue(target.key)
+            if issue is not None:
+                self.export_help.setText("This conversion is unavailable for the selected format.")
+                self.conversion_notice.set_message("Conversion unavailable", issue)
+            else:
+                self.export_help.setText(f"Save As or Save to Slot will create {target.name} output.")
+                self.conversion_notice.set_message(
+                    "Format conversion",
+                    f"{self.save.profile.name} → {target.name}; choose Save As or Save to Slot.",
+                )
             self.conversion_notice.show()
 
     def _set_state_badge(self, text: str, state: str) -> None:

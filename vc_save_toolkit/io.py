@@ -22,7 +22,8 @@ OUTPUT_SUFFIXES = {
     "gta-vc-pc": "retail-pc",
     "gta-vc-steam": "steam-pc",
     "vc-pc-extended": "revc-compatible",
-    "vice-city-vr": "vice-city-vr",
+    "vice-city-vr": "vice-city-vr-win64",
+    "vice-city-vr-quest": "vice-city-vr-quest",
 }
 
 
